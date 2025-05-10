@@ -59,11 +59,19 @@ dependencies:
   flutter_local_notifications: ^16.3.0
   
   # Background processing
-  workmanager: ^0.5.2
+  workmanager:
+    git:
+      url: https://github.com/fluttercommunity/flutter_workmanager.git
+      path: workmanager
+      ref: main
   
   # Weather API
   weather: ^3.1.1
   cached_network_image: ^3.3.0
+  firebase_core: ^3.13.0
+  cloud_firestore: ^5.6.7
+  firebase_storage: ^12.4.5
+  firebase_messaging: ^15.2.5
 
 dev_dependencies:
   flutter_test:
@@ -89,6 +97,7 @@ flutter:
 
   assets:
     - assets/images/
+    - assets/data/scp_data.json
 
   # To add assets to your application, add an assets section, like this:
   # assets:

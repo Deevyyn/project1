@@ -5,7 +5,10 @@ import 'package:cursortest/utils/theme.dart';
 import 'package:cursortest/services/location_service.dart';
 import 'package:cursortest/services/image_validation_service.dart';
 import 'package:cursortest/services/report_service.dart';
+import 'package:cursortest/services/geocoding_service.dart';
 import 'dart:io';
+import 'package:cursortest/widgets/custom_toast.dart';
+import 'package:cursortest/screens/report_success_screen.dart';
 
 class ReportFormScreen extends StatefulWidget {
   const ReportFormScreen({super.key});
@@ -79,9 +82,14 @@ class _ReportFormScreenState extends State<ReportFormScreen> {
   
   void _showLocationError() {
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Could not get your location. Please enable location services.'),
-        backgroundColor: AppTheme.errorRed,
+      SnackBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        behavior: SnackBarBehavior.floating,
+        content: const CustomToast(
+          message: 'Could not get your location. Please enable location services.',
+          type: ToastType.error,
+        ),
       ),
     );
   }
@@ -121,15 +129,12 @@ class _ReportFormScreenState extends State<ReportFormScreen> {
   void _showImageValidationError(String message) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text(message),
-        backgroundColor: AppTheme.errorRed,
-        duration: const Duration(seconds: 5),
-        action: SnackBarAction(
-          label: 'Dismiss',
-          textColor: Colors.white,
-          onPressed: () {
-            ScaffoldMessenger.of(context).hideCurrentSnackBar();
-          },
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        behavior: SnackBarBehavior.floating,
+        content: CustomToast(
+          message: message,
+          type: ToastType.error,
         ),
       ),
     );
@@ -165,23 +170,63 @@ class _ReportFormScreenState extends State<ReportFormScreen> {
     });
 
     try {
-      if (_currentPosition == null) {
+      double? finalLatitude;
+      double? finalLongitude;
+
+      // If user provided a manual location, try to geocode it
+      if (_locationDescription != null && _locationDescription!.trim().isNotEmpty) {
+        final coords = await GeocodingService.getCoordinatesFromAddress(_locationDescription!);
+        if (coords != null) {
+          finalLatitude = coords['lat'];
+          finalLongitude = coords['lng'];
+        } else {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              backgroundColor: Colors.transparent,
+              elevation: 0,
+              behavior: SnackBarBehavior.floating,
+              content: const CustomToast(
+                message: 'Could not resolve location. Please check the address.',
+                type: ToastType.error,
+              ),
+            ),
+          );
+          setState(() {
+            _isSubmitting = false;
+          });
+          return;
+        }
+      } else if (_currentPosition != null) {
+        // Use GPS coordinates if no manual location provided
+        finalLatitude = _currentPosition!.latitude;
+        finalLongitude = _currentPosition!.longitude;
+      } else {
         throw Exception('Location is required');
       }
 
+      // Create the report with image validation status
       final report = {
-        'latitude': _currentPosition!.latitude,
-        'longitude': _currentPosition!.longitude,
+        'latitude': finalLatitude,
+        'longitude': finalLongitude,
         'locationDescription': _locationDescription,
         'description': _description,
         'severity': _severity,
         'imageUrl': _imagePath,
         'timestamp': DateTime.now().toIso8601String(),
         'reportedBy': 'User', // Replace with actual user ID when authentication is implemented
+        'imageValidated': _imageValidationResult?.imageValidated ?? false,
       };
 
-      // TODO: Implement actual API call to submit the report
-      await Future.delayed(const Duration(seconds: 2)); // Simulated API call
+      // Submit the report
+      final submittedReport = await _reportService.submitReport(
+        latitude: finalLatitude!,
+        longitude: finalLongitude!,
+        description: _description,
+        severity: _severity,
+        imagePath: _imagePath,
+        imageValidated: _imageValidationResult?.imageValidated ?? false,
+      );
 
       if (!mounted) return;
       
@@ -189,15 +234,41 @@ class _ReportFormScreenState extends State<ReportFormScreen> {
         _isSubmitting = false;
       });
 
-      // Show success message and navigate back
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Report submitted successfully'),
-          backgroundColor: Colors.green,
-        ),
+      // Show appropriate message based on image validation
+      String? warningMessage;
+      if (!_imageValidationResult!.imageValidated) {
+        warningMessage = 'Image validation was inconclusive. We\'ll verify your report based on your location and rainfall.';
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: Colors.transparent,
+            elevation: 0,
+            behavior: SnackBarBehavior.floating,
+            content: CustomToast(
+              message: warningMessage,
+              type: ToastType.warning,
+            ),
+            duration: const Duration(seconds: 5),
+          ),
+        );
+      } else {
+        warningMessage = null;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: Colors.transparent,
+            elevation: 0,
+            behavior: SnackBarBehavior.floating,
+            content: const CustomToast(
+              message: 'Report submitted successfully',
+              type: ToastType.success,
+            ),
+          ),
+        );
+      }
+
+      // Navigate to the success screen
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(builder: (context) => ReportSuccessScreen(warningMessage: warningMessage)),
       );
-      Navigator.pop(context);
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -338,42 +409,45 @@ class _ReportFormScreenState extends State<ReportFormScreen> {
                           ? 'Image is clear'
                           : 'Image is too blurry',
                     ),
-                    _buildValidationResultTile(
-                      title: 'Water Detection',
-                      isValid: _imageValidationResult!.containsWaterColors,
-                      message: _imageValidationResult!.containsWaterColors
-                          ? 'Water detected in image'
-                          : 'No water detected in image',
-                    ),
+                    if (_imageValidationResult!.containsWaterColors)
+                      _buildValidationResultTile(
+                        title: 'Water Detection',
+                        isValid: true,
+                        message: 'Water detected in image',
+                      ),
                   ],
                 ),
               ),
             Padding(
               padding: const EdgeInsets.all(16.0),
               child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                 children: [
-                  ElevatedButton.icon(
-                    onPressed: () => _pickImage(ImageSource.camera),
-                    icon: const Icon(Icons.camera_alt),
-                    label: const Text('Retake Photo'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: AppTheme.primaryBlue,
-                      foregroundColor: Colors.white,
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      onPressed: () => _pickImage(ImageSource.camera),
+                      icon: const Icon(Icons.camera_alt),
+                      label: const Text('Retake Photo'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppTheme.primaryBlue,
+                        foregroundColor: Colors.white,
+                      ),
                     ),
                   ),
-                  ElevatedButton.icon(
-                    onPressed: () {
-                      setState(() {
-                        _imagePath = null;
-                        _imageValidationResult = null;
-                      });
-                    },
-                    icon: const Icon(Icons.delete),
-                    label: const Text('Remove'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: AppTheme.errorRed,
-                      foregroundColor: Colors.white,
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      onPressed: () {
+                        setState(() {
+                          _imagePath = null;
+                          _imageValidationResult = null;
+                        });
+                      },
+                      icon: const Icon(Icons.delete),
+                      label: const Text('Remove'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppTheme.errorRed,
+                        foregroundColor: Colors.white,
+                      ),
                     ),
                   ),
                 ],
@@ -412,24 +486,28 @@ class _ReportFormScreenState extends State<ReportFormScreen> {
             ),
             const SizedBox(height: 16),
             Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
               children: [
-                ElevatedButton.icon(
-                  onPressed: () => _pickImage(ImageSource.camera),
-                  icon: const Icon(Icons.camera_alt),
-                  label: const Text('Take Photo'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppTheme.primaryBlue,
-                    foregroundColor: Colors.white,
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: () => _pickImage(ImageSource.camera),
+                    icon: const Icon(Icons.camera_alt),
+                    label: const Text('Take Photo'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppTheme.primaryBlue,
+                      foregroundColor: Colors.white,
+                    ),
                   ),
                 ),
-                ElevatedButton.icon(
-                  onPressed: () => _pickImage(ImageSource.gallery),
-                  icon: const Icon(Icons.photo_library),
-                  label: const Text('Gallery'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppTheme.primaryBlue,
-                    foregroundColor: Colors.white,
+                const SizedBox(width: 8),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: () => _pickImage(ImageSource.gallery),
+                    icon: const Icon(Icons.photo_library),
+                    label: const Text('Gallery'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppTheme.primaryBlue,
+                      foregroundColor: Colors.white,
+                    ),
                   ),
                 ),
               ],
@@ -649,12 +727,6 @@ class _ReportFormScreenState extends State<ReportFormScreen> {
                   decoration: InputDecoration(
                     labelText: 'Description',
                     hintText: 'Describe the flood situation...',
-                    labelStyle: AppTheme.bodyText.copyWith(
-                      color: AppTheme.darkBlue,
-                    ),
-                    hintStyle: AppTheme.bodyTextSmall.copyWith(
-                      color: AppTheme.darkGray,
-                    ),
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(8),
                       borderSide: const BorderSide(color: AppTheme.mediumGray),
@@ -683,15 +755,6 @@ class _ReportFormScreenState extends State<ReportFormScreen> {
                     setState(() {
                       _descriptionLength = value.length;
                     });
-                  },
-                  validator: (value) {
-                    if (value == null || value.isEmpty) {
-                      return 'Please enter a description';
-                    }
-                    if (value.length < 10) {
-                      return 'Description must be at least 10 characters';
-                    }
-                    return null;
                   },
                   onSaved: (value) {
                     _description = value ?? '';

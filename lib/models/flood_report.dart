@@ -1,4 +1,3 @@
-
 enum FloodSeverity {
   low,
   medium,
@@ -18,6 +17,7 @@ class FloodReport {
   final String? locationName;
   final double? waterDepth;
   final String? additionalNotes;
+  final bool imageValidated;
 
   FloodReport({
     required this.id,
@@ -32,6 +32,7 @@ class FloodReport {
     this.locationName,
     this.waterDepth,
     this.additionalNotes,
+    this.imageValidated = false,
   });
 
   // Create a FloodReport from JSON
@@ -53,6 +54,7 @@ class FloodReport {
           ? (json['waterDepth'] as num).toDouble() 
           : null,
       additionalNotes: json['additionalNotes'],
+      imageValidated: json['imageValidated'] ?? false,
     );
   }
 
@@ -71,6 +73,7 @@ class FloodReport {
       'locationName': locationName,
       'waterDepth': waterDepth,
       'additionalNotes': additionalNotes,
+      'imageValidated': imageValidated,
     };
   }
 
@@ -102,6 +105,7 @@ class FloodReport {
     String? locationName,
     double? waterDepth,
     String? additionalNotes,
+    bool? imageValidated,
   }) {
     return FloodReport(
       id: id ?? this.id,
@@ -116,6 +120,7 @@ class FloodReport {
       locationName: locationName ?? this.locationName,
       waterDepth: waterDepth ?? this.waterDepth,
       additionalNotes: additionalNotes ?? this.additionalNotes,
+      imageValidated: imageValidated ?? this.imageValidated,
     );
   }
 } 

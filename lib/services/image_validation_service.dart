@@ -14,6 +14,7 @@ class ImageValidationResult {
   final bool containsWaterColors;
   final bool hasValidMetadata;
   final String? metadataError;
+  final bool imageValidated;
 
   ImageValidationResult({
     required this.isValid,
@@ -25,6 +26,7 @@ class ImageValidationResult {
     this.containsWaterColors = false,
     this.hasValidMetadata = false,
     this.metadataError,
+    this.imageValidated = false,
   });
 }
 
@@ -121,22 +123,19 @@ class ImageValidationService {
       final containsWaterColors = waterColorScore >= waterColorThreshold;
       final hasValidMetadata = metadataResult.isValid;
       
-      // Determine overall validity
+      // Determine overall validity - now only checks resolution, blur, and metadata
       final isValid = hasValidResolution && 
                      isNotBlurry && 
-                     containsWaterColors && 
                      hasValidMetadata;
       
       String? errorMessage;
       
-      if (!isNotBlurry && !containsWaterColors) {
-        errorMessage = 'Image appears to be blurry and doesn\'t show clear signs of water.';
-      } else if (!isNotBlurry) {
+      if (!isNotBlurry) {
         errorMessage = 'Image appears to be blurry. Please take a clearer photo.';
-      } else if (!containsWaterColors) {
-        errorMessage = 'Image doesn\'t show clear signs of water. Please ensure the photo clearly shows the flood situation.';
       } else if (!hasValidMetadata) {
         errorMessage = metadataResult.errorMessage;
+      } else if (!containsWaterColors) {
+        errorMessage = 'Image validation was inconclusive. We\'ll verify your report based on your location and rainfall.';
       }
 
       return ImageValidationResult(
@@ -149,6 +148,7 @@ class ImageValidationService {
         containsWaterColors: containsWaterColors,
         hasValidMetadata: hasValidMetadata,
         metadataError: metadataResult.errorMessage,
+        imageValidated: containsWaterColors,
       );
     } catch (e) {
       return ImageValidationResult(
@@ -208,6 +208,7 @@ class ImageValidationService {
     
     int waterColorPixels = 0;
     int totalPixels = 0;
+    double confidenceSum = 0.0;
     
     for (int y = 0; y < resized.height; y++) {
       for (int x = 0; x < resized.width; x++) {
@@ -219,30 +220,32 @@ class ImageValidationService {
           pixel.g.toInt().clamp(0, 255),
           pixel.b.toInt().clamp(0, 255),
         );
-        final h = hsv[0]; // Hue
-        final s = hsv[1]; // Saturation
-        final v = hsv[2]; // Value (brightness)
+        final h = hsv[0]; // Hue (0-360)
+        final s = hsv[1]; // Saturation (0-1)
+        final v = hsv[2]; // Value/brightness (0-1)
         
-        // Water detection rules:
-        // 1. Blue-ish hues (180-260 degrees)
-        // 2. Gray tones (low saturation, medium-high value)
-        // 3. Dark blue/gray (lower value, blue hue)
-        bool isWaterColor = false;
+        // Water detection rules with confidence scoring
+        double confidence = 0.0;
         
-        // Blue water
-        if (h >= 180 && h <= 260 && s >= 0.2) {
-          isWaterColor = true;
+        // 1. Brownish tones (muddy water): hue ~20-40, low saturation
+        if (h >= 20 && h <= 40 && s < 0.3) {
+          // Higher confidence for lower saturation in muddy water
+          confidence = (0.3 - s) * 2.0;
         }
-        // Gray water (muddy)
-        else if (s < 0.2 && v >= 0.2 && v <= 0.8) {
-          isWaterColor = true;
+        // 2. Dark grayish or greenish tones: hue ~160-200 with low brightness
+        else if (h >= 160 && h <= 200 && v < 0.5) {
+          // Higher confidence for lower brightness in dark water
+          confidence = (0.5 - v) * 2.0;
         }
-        // Dark water
-        else if (pixel.b > pixel.r && pixel.b > pixel.g && v < 0.5) {
-          isWaterColor = true;
+        // 3. Traditional blue water: hue ~180-240
+        else if (h >= 180 && h <= 240) {
+          // Higher confidence for higher saturation in blue water
+          confidence = s;
         }
         
-        if (isWaterColor) {
+        // Add to confidence sum if above minimum threshold
+        if (confidence > 0.1) {
+          confidenceSum += confidence;
           waterColorPixels++;
         }
         
@@ -250,7 +253,12 @@ class ImageValidationService {
       }
     }
     
-    return waterColorPixels / totalPixels;
+    // Calculate final score as weighted average of pixel count and confidence
+    final pixelRatio = waterColorPixels / totalPixels;
+    final avgConfidence = waterColorPixels > 0 ? confidenceSum / waterColorPixels : 0.0;
+    
+    // Combine pixel ratio and confidence for final score
+    return (pixelRatio * 0.6 + avgConfidence * 0.4).clamp(0.0, 1.0);
   }
   
   // Helper function to convert RGB to HSV

@@ -1,6 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:cursortest/services/weather_service.dart';
-import 'package:cursortest/models/weather_data.dart';
 
 void main() {
   test('OpenWeather API returns real-time weather data for Benin City', () async {
