@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1099049015488",
+    "project_id": "project1-653d1",
+    "storage_bucket": "project1-653d1.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1099049015488:android:bca7c98d9e8333e84a3525",
+        "android_client_info": {
+          "package_name": "com.example.flood_alert"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBjjPfXEil3PJHYboalHgQAYEyu8jsZK-g"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

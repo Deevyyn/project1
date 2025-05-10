@@ -26,8 +26,8 @@ class ImageMetadataResult {
 }
 
 class ImageMetadataService {
-  // Maximum time difference between image capture and report submission (24 hours)
-  static const Duration maxTimeDifference = Duration(hours: 24);
+  // Maximum time difference between image capture and report submission (7 days)
+  static const Duration maxTimeDifference = Duration(days: 7);
   
   // Maximum distance between image location and report location (100 meters)
   static const double maxLocationDifference = 100.0;
@@ -41,8 +41,9 @@ class ImageMetadataService {
       
       if (exifData.isEmpty) {
         return ImageMetadataResult(
-          isValid: false,
-          errorMessage: 'No EXIF data found in the image.',
+          isValid: true, // Allow submission even if no EXIF data
+          errorMessage: 'Image timestamp is missing. We\'ll verify using weather and location.',
+          hasValidTimestamp: false,
         );
       }
 
@@ -66,12 +67,14 @@ class ImageMetadataService {
         locationMatchesCurrent = distance <= maxLocationDifference;
       }
 
-      // Determine overall validity
-      final isValid = hasValidTimestamp && (hasValidLocation ? locationMatchesCurrent : true);
+      // Determine overall validity - now only checks location if available
+      final isValid = hasValidLocation ? locationMatchesCurrent : true;
       String? errorMessage;
       
-      if (!hasValidTimestamp) {
-        errorMessage = 'Image capture time is too old or invalid. Please take a recent photo.';
+      if (captureTime == null) {
+        errorMessage = 'Image timestamp is missing. We\'ll verify using weather and location.';
+      } else if (!hasValidTimestamp) {
+        errorMessage = 'Image may be old. Verifying against weather data.';
       } else if (hasValidLocation && !locationMatchesCurrent) {
         errorMessage = 'Image location doesn\'t match your current location. Please ensure you\'re reporting from the correct location.';
       }
@@ -88,8 +91,9 @@ class ImageMetadataService {
       );
     } catch (e) {
       return ImageMetadataResult(
-        isValid: false,
+        isValid: true, // Allow submission even if there's an error
         errorMessage: 'Error validating image metadata: ${e.toString()}',
+        hasValidTimestamp: false,
       );
     }
   }
@@ -98,10 +102,12 @@ class ImageMetadataService {
     try {
       // Try different EXIF tags for capture time
       final dateTimeOriginal = exifData['EXIF DateTimeOriginal'];
+      final createDate = exifData['EXIF CreateDate'];
       final dateTimeDigitized = exifData['EXIF DateTimeDigitized'];
       final dateTime = exifData['Image DateTime'];
       
       final dateTimeStr = dateTimeOriginal?.printable ?? 
+                         createDate?.printable ??
                          dateTimeDigitized?.printable ?? 
                          dateTime?.printable;
       
@@ -137,7 +143,8 @@ class ImageMetadataService {
     final now = DateTime.now();
     final difference = now.difference(captureTime);
     
-    return difference <= maxTimeDifference && difference.isNegative == false;
+    // Consider timestamp valid if it's within the last 72 hours
+    return difference <= Duration(hours: 72) && difference.isNegative == false;
   }
 
   Position? _extractLocation(Map<String, IfdTag> exifData) {
