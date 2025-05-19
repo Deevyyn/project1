@@ -4,7 +4,6 @@ import 'package:cursortest/utils/theme.dart';
 import 'package:cursortest/services/geofencing_service.dart';
 import 'package:cursortest/services/background_service.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:cursortest/services/supabase_service.dart';
 
 
 void main() async {
@@ -37,32 +36,10 @@ Future<void> _initializeServices() async {
     // Initialize background service
     final backgroundService = BackgroundService();
     await backgroundService.initialize();
-
-    // Test Supabase functionality if in debug mode
-    await _testSupabaseFunctionality();
   } catch (e) {
     debugPrint('Error initializing services: $e');
     // Let the error propagate to main() for handling
     rethrow;
-  }
-}
-
-/// Test function to demonstrate Supabase functionality for uploading images and submitting reports
-/// This is for demonstration purposes only and will only run in debug mode
-Future<void> _testSupabaseFunctionality() async {
-  try {
-    debugPrint('Testing Supabase functionality...');
-
-    // Create a SupabaseService instance
-    final supabaseService = SupabaseService();
-
-    // Run the test report submission function
-    await supabaseService.testReportSubmission();
-
-    debugPrint('Supabase functionality test completed successfully');
-  } catch (e) {
-    // Only log the error, don't rethrow as this is just a test
-    debugPrint('Error testing Supabase functionality: $e');
   }
 }
 

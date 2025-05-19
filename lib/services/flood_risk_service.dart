@@ -1,5 +1,7 @@
-import 'package:cursortest/services/weather_service.dart';
+import 'dart:developer';
+
 import 'package:cursortest/models/weather_data.dart';
+import 'package:cursortest/services/weather_service.dart';
 
 class FloodRiskService {
   static final FloodRiskService _instance = FloodRiskService._internal();
@@ -7,6 +9,18 @@ class FloodRiskService {
   FloodRiskService._internal();
 
   final WeatherService _weatherService = WeatherService();
+  
+  // Risk level thresholds
+  static const int highRiskThreshold = 6;
+  static const int mediumRiskThreshold = 3;
+  
+  // Scoring weights
+  static const int rainfallWeight = 2;
+  static const int elevationWeight = 2;
+  static const int scpAboveNormalWeight = 2;
+  static const int scpNormalWeight = 1;
+  static const int rainIntensityWeight = 1;
+  static const int humidityWeight = 1;
 
   /// Calculates flood risk level based on current weather data and other factors
   /// 
@@ -15,7 +29,7 @@ class FloodRiskService {
   /// [elevation] - Location elevation in meters
   /// [userReports] - Number of validated flood reports from the same region
   /// [scpRiskLevel] - SCP risk level ("Above Normal", "Normal", or "Below Normal")
-  /// [hasHistoricalFloodData] - Whether the region has historical flood data
+  /// [floodZoneMatch] - Whether the location is in a known flood zone
   /// 
   /// Returns a risk level as a String: "Low", "Medium", or "High"
   Future<String> calculateFloodRisk({
@@ -24,68 +38,22 @@ class FloodRiskService {
     required double elevation,
     required int userReports,
     required String scpRiskLevel,
-    required bool hasHistoricalFloodData,
+    required bool floodZoneMatch,
   }) async {
     try {
-      // Get current weather data for the location
-      final weatherData = await _weatherService.getWeatherForLocation(latitude, longitude);
+      final riskData = await getDetailedFloodRisk(
+        latitude: latitude,
+        longitude: longitude,
+        elevation: elevation,
+        userReports: userReports,
+        scpRiskLevel: scpRiskLevel,
+        floodZoneMatch: floodZoneMatch,
+      );
       
-      // If there are more than 2 user reports, override to High risk
-      if (userReports > 2) {
-        return "High";
-      }
-
-      int score = 0;
-
-      // Rainfall scoring based on weather data
-      if (weatherData.rainfall > 40) {
-        score += 2;
-      }
-
-      // Elevation scoring
-      if (elevation < 30) {
-        score += 2;
-      }
-
-      // SCP risk level scoring
-      switch (scpRiskLevel) {
-        case "Above Normal":
-          score += 2;
-          break;
-        case "Normal":
-          score += 1;
-          break;
-        case "Below Normal":
-          // No points added for Below Normal
-          break;
-        default:
-          throw ArgumentError('Invalid SCP risk level: $scpRiskLevel');
-      }
-
-      // Historical flood data scoring
-      if (hasHistoricalFloodData) {
-        score += 1;
-      }
-
-      // Additional risk factors from weather data
-      if (weatherData.rainIntensity > 10) {
-        score += 1; // Heavy rain increases risk
-      }
-      if (weatherData.humidity > 0.8) {
-        score += 1; // High humidity increases risk
-      }
-
-      // Determine final risk level based on total score
-      if (score >= 6) {
-        return "High";
-      } else if (score >= 3) {
-        return "Medium";
-      } else {
-        return "Low";
-      }
+      return riskData['riskLevel'] as String;
     } catch (e) {
-      // In case of error, return a default risk level
-      return "Medium";
+      log('Error calculating flood risk: $e', error: e);
+      return 'Medium'; // Default to medium on error
     }
   }
 
@@ -94,7 +62,7 @@ class FloodRiskService {
   /// Returns a map containing:
   /// - riskLevel: The calculated risk level ("Low", "Medium", or "High")
   /// - weatherData: The current weather data
-  /// - score: The calculated risk score
+  /// - score: The calculated risk score (0-7)
   /// - factors: A list of contributing risk factors
   Future<Map<String, dynamic>> getDetailedFloodRisk({
     required double latitude,
@@ -102,97 +70,121 @@ class FloodRiskService {
     required double elevation,
     required int userReports,
     required String scpRiskLevel,
-    required bool hasHistoricalFloodData,
+    required bool floodZoneMatch,
   }) async {
     try {
       final weatherData = await _weatherService.getWeatherForLocation(latitude, longitude);
       
       // If there are more than 2 user reports, return High risk immediately
       if (userReports > 2) {
-        return {
-          'riskLevel': "High",
-          'weatherData': weatherData,
-          'score': 7, // Override score
-          'factors': [
+        return _buildRiskResponse(
+          riskLevel: 'High',
+          score: 7, // Override score to ensure High risk
+          weatherData: weatherData,
+          factors: [
             'High number of user reports (>2)',
             'Current rainfall: ${weatherData.rainfall}mm',
             'Rain intensity: ${weatherData.rainIntensity}mm/h',
             'Elevation: ${elevation}m',
             'SCP Risk Level: $scpRiskLevel',
-            'Historical Data: ${hasHistoricalFloodData ? "Available" : "Not Available"}',
+            'Flood Zone Match: ${floodZoneMatch ? "Yes" : "No"}',
           ],
-        };
+        );
       }
 
       int score = 0;
-      List<String> factors = [];
+      final factors = <String>[];
 
-      // Rainfall scoring
+      // 1. Rainfall scoring (40mm threshold) - 2 points
       if (weatherData.rainfall > 40) {
-        score += 2;
-        factors.add('High rainfall (>40mm)');
+        score += rainfallWeight;
+        factors.add('Heavy rainfall (>40mm): +$rainfallWeight');
       }
 
-      // Elevation scoring
+      // 2. Elevation scoring (30m threshold) - 2 points
       if (elevation < 30) {
-        score += 2;
-        factors.add('Low elevation (<30m)');
+        score += elevationWeight;
+        factors.add('Low elevation (<30m): +$elevationWeight');
       }
 
-      // SCP risk level scoring
-      switch (scpRiskLevel) {
-        case "Above Normal":
-          score += 2;
-          factors.add('Above Normal SCP risk level');
+      // 3. SCP risk level scoring - 0-2 points
+      final normalizedScpLevel = scpRiskLevel.trim().toLowerCase();
+      switch (normalizedScpLevel) {
+        case 'above normal':
+          score += scpAboveNormalWeight;
+          factors.add('Above Normal SCP risk level: +$scpAboveNormalWeight');
           break;
-        case "Normal":
-          score += 1;
-          factors.add('Normal SCP risk level');
+        case 'normal':
+          score += scpNormalWeight;
+          factors.add('Normal SCP risk level: +$scpNormalWeight');
           break;
-        case "Below Normal":
-          factors.add('Below Normal SCP risk level');
+        case 'below normal':
+        default:
+          factors.add('Below Normal SCP risk level: +0');
           break;
       }
 
-      // Historical flood data scoring
-      if (hasHistoricalFloodData) {
-        score += 1;
-        factors.add('Historical flood data available');
-      }
-
-      // Additional weather factors
+      // 4. Rain intensity scoring (10mm/h threshold) - 1 point
       if (weatherData.rainIntensity > 10) {
-        score += 1;
-        factors.add('High rain intensity (>10mm/h)');
+        score += rainIntensityWeight;
+        factors.add('High rain intensity (>10mm/h): +$rainIntensityWeight');
       }
+
+      // 5. Humidity scoring (80% threshold) - 1 point
       if (weatherData.humidity > 0.8) {
-        score += 1;
-        factors.add('High humidity (>80%)');
+        score += humidityWeight;
+        factors.add('High humidity (>80%): +$humidityWeight');
       }
 
-      // Determine final risk level
-      String riskLevel;
-      if (score >= 6) {
-        riskLevel = "High";
-      } else if (score >= 3) {
-        riskLevel = "Medium";
+      // Determine final risk level based on total score (0-7 scale)
+      final String riskLevel;
+      if (score >= highRiskThreshold) {
+        riskLevel = 'High';
+      } else if (score >= mediumRiskThreshold) {
+        riskLevel = 'Medium';
       } else {
-        riskLevel = "Low";
+        riskLevel = 'Low';
       }
 
-      return {
-        'riskLevel': riskLevel,
-        'weatherData': weatherData,
-        'score': score,
-        'factors': factors,
-      };
+      return _buildRiskResponse(
+        riskLevel: riskLevel,
+        score: score,
+        weatherData: weatherData,
+        factors: factors,
+      );
     } catch (e) {
-      return {
-        'riskLevel': "Medium",
-        'weatherData': WeatherData.defaultData(),
-        'score': 3,
-        'factors': ['Error calculating risk: $e'],
-      };
+      log('Error in getDetailedFloodRisk: $e', error: e);
+      return _buildErrorResponse(e);
     }
   }
-} 
+  
+  /// Builds a standardized risk response map
+  Map<String, dynamic> _buildRiskResponse({
+    required String riskLevel,
+    required int score,
+    required WeatherData weatherData,
+    required List<String> factors,
+  }) {
+    return {
+      'riskLevel': riskLevel,
+      'score': score,
+      'weatherData': weatherData,
+      'factors': factors,
+      'timestamp': DateTime.now().toIso8601String(),
+    };
+  }
+  
+  /// Builds an error response
+  Map<String, dynamic> _buildErrorResponse(dynamic error) {
+    log('Error in flood risk calculation', error: error);
+    return _buildRiskResponse(
+      riskLevel: 'Medium',
+      score: 3, // Middle of the road score on error
+      weatherData: WeatherData.defaultData(),
+      factors: [
+        'Error calculating risk: ${error.toString()}',
+        'Using default medium risk level',
+      ],
+    );
+  }
+}

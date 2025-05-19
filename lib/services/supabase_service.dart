@@ -1,8 +1,14 @@
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:flutter/material.dart';
 import 'package:path/path.dart' as path;
 import 'package:uuid/uuid.dart';
+import 'package:cursortest/models/validation_status.dart';
+import 'package:cursortest/services/flood_risk_service.dart';
+import 'package:cursortest/services/weather_service.dart';
+
+const Uuid _uuid = Uuid();
 
 /// Service class for handling all Supabase related operations
 /// This includes flood report submission, image uploads, and data retrieval
@@ -14,9 +20,10 @@ class SupabaseService {
 
   // Get instance of Supabase client
   final SupabaseClient _supabase = Supabase.instance.client;
+  final WeatherService _weatherService = WeatherService();
   
   // Constants
-  static const String _reportImagesStorageBucket = 'report_images';
+  static const String _reportImagesStorageBucket = 'flood-report-images';
   static const String _floodReportsTable = 'flood_reports';
 
   /// Uploads an image to Supabase Storage
@@ -24,7 +31,10 @@ class SupabaseService {
   Future<String?> uploadImage(File imageFile) async {
     try {
       final String fileExt = path.extension(imageFile.path);
-      final fileName = '${const Uuid().v4()}$fileExt';
+      // Add 'public/' prefix to the filename to match storage policy
+      final fileName = 'public/${_uuid.v4()}$fileExt';
+      
+      debugPrint('Uploading image to: $fileName');
       
       // Upload the file to Supabase Storage
       await _supabase
@@ -38,7 +48,7 @@ class SupabaseService {
           .from(_reportImagesStorageBucket)
           .getPublicUrl(fileName);
       
-      debugPrint('Image uploaded successfully: $imageUrl');
+      debugPrint('Image uploaded successfully. Public URL: $imageUrl');
       return imageUrl;
     } catch (e) {
       debugPrint('Error uploading image: $e');
@@ -48,6 +58,8 @@ class SupabaseService {
 
   /// Submits a flood report to Supabase
   /// Returns the submitted report data if successful
+  /// Submits a new flood report to the database
+  /// Returns the created report if successful, null otherwise
   Future<Map<String, dynamic>?> submitFloodReport({
     required String description,
     required String location,
@@ -57,35 +69,51 @@ class SupabaseService {
     String? riskLevel,
     String? imageUrl,
     bool imageValidated = false,
+    double? elevation,
+    String? scpRiskLevel,
+    bool floodZoneMatch = false,
   }) async {
     try {
-      final reportData = {
+      final data = {
         'description': description,
-        'location': location,
+        'location_description': location,
         'latitude': latitude,
         'longitude': longitude,
         'severity': severity,
-        'risk_level': riskLevel ?? 'Medium',
         'image_url': imageUrl,
         'image_validated': imageValidated,
+        'validation_status': ['pending'],
+        'report_source': 'app',
+        'is_validated': false,
         'timestamp': DateTime.now().toIso8601String(),
-        'status': 'submitted',
+        'validation_data': {
+          'risk_level': riskLevel,
+          'elevation': elevation,
+          'user_reports_count': 0, // Will be updated in post-validation
+          'scp_risk_level': scpRiskLevel,
+          'flood_zone_match': floodZoneMatch,
+          'risk_score': null,
+          'rainfall': null,
+        },
       };
 
+      // Remove null values to avoid database errors
+      data.removeWhere((key, value) => value == null);
+
+      // Insert and get the new report
       final response = await _supabase
           .from(_floodReportsTable)
-          .insert(reportData)
-          .select();
+          .insert(data)
+          .select()
+          .single();
+
+      // Start post-validation in the background
+      _performPostValidation(response['id']);
       
-      if (response.isNotEmpty) {
-        debugPrint('Flood report submitted successfully: ${response[0]}');
-        return response[0];
-      }
-      
-      return null;
+      return response;
     } catch (e) {
       debugPrint('Error submitting flood report: $e');
-      return null;
+      rethrow;
     }
   }
 
@@ -97,7 +125,59 @@ class SupabaseService {
           .select()
           .order('timestamp', ascending: false);
       
-      return List<Map<String, dynamic>>.from(response);
+      // Convert to list and process each report
+      final reports = List<Map<String, dynamic>>.from(response);
+      
+      // Ensure each report has a properly formatted validation_data and timestamp
+      return reports.map((report) {
+        // Ensure timestamp is properly formatted
+        if (report['timestamp'] == null) {
+          report['timestamp'] = DateTime.now().toIso8601String();
+        } else if (report['timestamp'] is String) {
+          // If it's already a string, ensure it's in ISO 8601 format
+          try {
+            DateTime.parse(report['timestamp']);
+          } catch (e) {
+            debugPrint('Invalid timestamp format for report ${report['id']}: ${report['timestamp']}');
+            report['timestamp'] = DateTime.now().toIso8601String();
+          }
+        } else if (report['timestamp'] is DateTime) {
+          // Convert DateTime to ISO 8601 string if needed
+          report['timestamp'] = (report['timestamp'] as DateTime).toIso8601String();
+        }
+        
+        final validationData = report['validation_data'] ?? {};
+        
+        // Move any legacy fields to validation_data if they exist at the root level
+        final legacyFields = {
+          'elevation': report['elevation'],
+          'risk_level': report['risk_level'],
+          'scp_risk_level': report['scp_risk_level'],
+          'flood_zone_match': report['flood_zone_match'],
+          'user_reports_count': report['user_reports_count'],
+          'risk_score': report['risk_score'],
+        };
+        
+        // Only include non-null legacy fields
+        legacyFields.removeWhere((key, value) => value == null);
+        
+        if (legacyFields.isNotEmpty) {
+          report['validation_data'] = {
+            ...validationData,
+            ...legacyFields,
+          };
+          
+          // Remove the legacy fields from the root
+          report.remove('elevation');
+          report.remove('risk_level');
+          report.remove('scp_risk_level');
+          report.remove('flood_zone_match');
+          report.remove('user_reports_count');
+          report.remove('risk_score');
+        }
+        
+        return report;
+      }).toList();
     } catch (e) {
       debugPrint('Error retrieving flood reports: $e');
       return [];
@@ -132,6 +212,39 @@ class SupabaseService {
                 reportLat <= latitude + latDiff &&
                 reportLng >= longitude - lngDiff &&
                 reportLng <= longitude + lngDiff);
+      }).map((report) {
+        // Ensure each report has properly formatted validation_data
+        final validationData = report['validation_data'] ?? {};
+        
+        // Move any legacy fields to validation_data if they exist at the root level
+        final legacyFields = {
+          'elevation': report['elevation'],
+          'risk_level': report['risk_level'],
+          'scp_risk_level': report['scp_risk_level'],
+          'flood_zone_match': report['flood_zone_match'],
+          'user_reports_count': report['user_reports_count'],
+          'risk_score': report['risk_score'],
+        };
+        
+        // Only include non-null legacy fields
+        legacyFields.removeWhere((key, value) => value == null);
+        
+        if (legacyFields.isNotEmpty) {
+          report['validation_data'] = {
+            ...validationData,
+            ...legacyFields,
+          };
+          
+          // Remove the legacy fields from the root
+          report.remove('elevation');
+          report.remove('risk_level');
+          report.remove('scp_risk_level');
+          report.remove('flood_zone_match');
+          report.remove('user_reports_count');
+          report.remove('risk_score');
+        }
+        
+        return report;
       }).toList();
     } catch (e) {
       debugPrint('Error retrieving nearby flood reports: $e');
@@ -139,39 +252,211 @@ class SupabaseService {
     }
   }
 
-  /// Updates the status of a flood report
-  Future<bool> updateReportStatus(String reportId, String status) async {
+  /// Counts the number of validated reports within a specified radius of the given coordinates
+  /// Counts the number of validated reports within a specified radius of the given coordinates
+  /// [reportId] - The ID of the current report to exclude from the count
+  /// [latitude] - The latitude of the location to check
+  /// [longitude] - The longitude of the location to check
+  /// [radiusKm] - The radius in kilometers to search for nearby reports (default: 2.0km)
+  /// Counts the number of validated reports within a specified radius of the given coordinates
+  /// [reportId] - The ID of the current report to exclude from the count
+  /// [latitude] - The latitude of the location to check
+  /// [longitude] - The longitude of the location to check
+  /// [radiusKm] - The radius in kilometers to search for nearby reports (default: 2.0km)
+  Future<int> countNearbyValidatedReports(
+    String reportId,
+    double latitude,
+    double longitude, {
+    double radiusKm = 2.0,
+  }) async {
     try {
-      await _supabase
-          .from(_floodReportsTable)
-          .update({'status': status})
-          .eq('id', reportId);
+      debugPrint('🔍 Counting nearby validated reports for report $reportId');
       
-      return true;
-    } catch (e) {
-      debugPrint('Error updating report status: $e');
-      return false;
+      // Convert km to meters for the RPC call
+      final radiusMeters = (radiusKm * 1000).round();
+      
+      final response = await _supabase.rpc(
+        'get_nearby_reports',
+        params: {
+          'lat': latitude,
+          'lng': longitude,
+          'radius_meters': radiusMeters,
+          'exclude_id': reportId,
+        },
+      );
+      
+      final count = response.length;
+      debugPrint('✅ Found $count nearby validated reports within ${radiusMeters}m');
+      
+      return count;
+    } catch (e, stackTrace) {
+      debugPrint('❌ Error counting nearby reports: $e');
+      debugPrint('Stack trace: $stackTrace');
+      
+      // Log the error to the server if needed
+      // await _logErrorToServer('countNearbyValidatedReports', e, stackTrace);
+      
+      // Return 0 to allow the process to continue
+      return 0;
     }
   }
 
-  /// Test function to demonstrate report submission functionality
-  Future<void> testReportSubmission() async {
+  /// Updates the status of a flood report
+  /// Updates the validation status of a report
+  Future<void> updateReportValidationStatus({
+    required String reportId,
+    required ValidationStatus status,
+    Map<String, dynamic>? validationData,
+    String? error,
+  }) async {
     try {
-      // Simulate submitting a test flood report
-      final testReport = await submitFloodReport(
-        description: 'Test flood report',
-        location: 'Test Location',
-        latitude: 9.0820,
-        longitude: 8.6753,
-        severity: 'Medium',
-        riskLevel: 'Medium',
-        imageUrl: 'https://example.com/test-image.jpg',
-        imageValidated: true,
+      // Get existing validation data
+      final response = await _supabase
+          .from(_floodReportsTable)
+          .select('validation_data')
+          .eq('id', reportId)
+          .single();
+      
+      // Get existing validation data or create new
+      final existingData = response['validation_data'] ?? {};
+      
+      // Prepare validation data update
+      final validationDataUpdate = {
+        ...existingData,
+        if (validationData != null) ...{
+          'risk_score': validationData['score'],
+          'risk_level': validationData['riskLevel']?.toString().toLowerCase(),
+          'updated_at': DateTime.now().toIso8601String(),
+        },
+      };
+
+      final updateData = <String, dynamic>{
+        'validation_status': [status.name],
+        'is_validated': status == ValidationStatus.completed,
+        'validation_data': validationDataUpdate,
+      };
+
+      // Add error if present
+      if (error != null) {
+        updateData['validation_error'] = error.length > 255 ? error.substring(0, 255) : error;
+      }
+
+      // Remove null values to avoid database errors
+      updateData.removeWhere((key, value) => value == null);
+
+      await _supabase
+          .from(_floodReportsTable)
+          .update(updateData)
+          .eq('id', reportId);
+    } catch (e) {
+      debugPrint('Error updating report validation status: $e');
+      rethrow;
+    }
+  }
+
+  /// Performs post-validation for a report
+  /// Performs post-validation for a report
+  Future<void> _performPostValidation(String reportId) async {
+    try {
+      debugPrint('🔄 Starting post-validation for report: $reportId');
+      
+      // Mark as processing
+      await _supabase.from(_floodReportsTable).update({
+        'validation_status': ['processing'],
+      }).eq('id', reportId);
+
+      // Get the full report data with validation_data
+      final response = await _supabase
+          .from(_floodReportsTable)
+          .select()
+          .eq('id', reportId)
+          .single();
+      
+      debugPrint('📍 Report location: ${response['latitude']}, ${response['longitude']}');
+
+      // Get existing validation data or create new
+      final existingData = response['validation_data'] ?? {};
+      
+      // Count nearby validated reports (excluding the current report)
+      final nearbyReports = await countNearbyValidatedReports(
+        reportId,  // Pass the reportId to exclude it from the count
+        response['latitude'] as double,
+        response['longitude'] as double,
       );
       
-      debugPrint('Test report submission result: $testReport');
+      debugPrint('🔍 Found $nearbyReports nearby validated reports');
+
+      // Get weather data for the report location
+      final weatherData = await _weatherService.getWeatherForLocation(
+        response['latitude'] as double,
+        response['longitude'] as double,
+      );
+
+      // Update the validation data with the nearby reports count and weather data
+      final updatedValidationData = {
+        ...existingData,
+        'user_reports_count': nearbyReports,
+        'rainfall': weatherData.rainfall,
+        'humidity': weatherData.humidity,
+        'weather_timestamp': DateTime.now().toIso8601String(),
+      };
+
+      // Update the report with the updated validation data
+      await _supabase
+          .from(_floodReportsTable)
+          .update({
+            'validation_data': updatedValidationData,
+          })
+          .eq('id', reportId);
+
+      // Perform validation with updated report count
+      final riskData = await FloodRiskService().getDetailedFloodRisk(
+        latitude: response['latitude'] as double,
+        longitude: response['longitude'] as double,
+        elevation: (existingData['elevation'] as num?)?.toDouble() ?? 0.0,
+        userReports: nearbyReports,
+        scpRiskLevel: (existingData['scp_risk_level'] as String?) ?? 'Normal',
+        floodZoneMatch: (existingData['flood_zone_match'] as bool?) ?? false,
+      );
+      
+      debugPrint('📊 Calculated risk level: ${riskData['riskLevel']} (Score: ${riskData['score']})');
+
+      // Update with validation results
+      await updateReportValidationStatus(
+        reportId: reportId,
+        status: ValidationStatus.completed,
+        validationData: riskData,
+      );
+      
+      debugPrint('✅ Successfully validated report: $reportId');
     } catch (e) {
-      debugPrint('Error in test report submission: $e');
+      final errorMsg = 'Error in post-validation: $e';
+      debugPrint('❌ $errorMsg');
+      
+      // Get existing validation data
+      final response = await _supabase
+          .from(_floodReportsTable)
+          .select('validation_data')
+          .eq('id', reportId)
+          .single();
+      
+      // Update validation data with error
+      final updatedValidationData = {
+        ...(response['validation_data'] ?? {}),
+        'error': errorMsg,
+        'updated_at': DateTime.now().toIso8601String(),
+      };
+
+      // Mark as failed if there's an error
+      await _supabase.from(_floodReportsTable).update({
+        'validation_status': ['failed'],
+        'validation_error': errorMsg.length <= 255 ? errorMsg : errorMsg.substring(0, 255),
+        'is_validated': false,
+        'validation_data': updatedValidationData,
+      }).eq('id', reportId);
+      
+      // Re-throw to allow callers to handle the error if needed
+      rethrow;
     }
   }
 }

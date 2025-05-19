@@ -211,8 +211,13 @@ class _WeatherWidgetState extends State<WeatherWidget> {
               ),
               _buildWeatherDetail(
                 Icons.air,
-                '${widget.weatherData.windSpeed} m/s',
+                '${widget.weatherData.windSpeed.toStringAsFixed(1)} m/s',
                 'Wind',
+              ),
+              _buildWeatherDetail(
+                Icons.water,
+                '${widget.weatherData.rainfall.toStringAsFixed(1)} mm',
+                'Rainfall',
               ),
               _buildWeatherDetail(
                 Icons.visibility,
@@ -225,12 +230,13 @@ class _WeatherWidgetState extends State<WeatherWidget> {
         
         const Divider(),
         
-        // Flood risk indicator
+        // Flood risk and rain intensity indicator
         Padding(
           padding: const EdgeInsets.all(16.0),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // Flood risk row
               Text(
                 'Flood Risk',
                 style: AppTheme.headingSmall.copyWith(
@@ -267,15 +273,25 @@ class _WeatherWidgetState extends State<WeatherWidget> {
                   ),
                 ],
               ),
-              if (widget.weatherData.rainIntensity > 0) ...[
-                const SizedBox(height: 8),
-                Text(
-                  'Rain intensity: ${widget.weatherData.rainIntensity} mm/h',
-                  style: AppTheme.bodyTextSmall.copyWith(
+              
+              // Rain intensity row
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  const Icon(
+                    Icons.speed,
+                    size: 20,
                     color: AppTheme.secondaryBlue,
                   ),
-                ),
-              ],
+                  const SizedBox(width: 12),
+                  Text(
+                    'Rain Intensity: ${widget.weatherData.rainIntensity.toStringAsFixed(1)} mm/h',
+                    style: AppTheme.bodyTextSmall.copyWith(
+                      color: AppTheme.secondaryBlue,
+                    ),
+                  ),
+                ],
+              ),
             ],
           ),
         ),
@@ -315,28 +331,38 @@ class _WeatherWidgetState extends State<WeatherWidget> {
   }
 
   Widget _buildWeatherDetail(IconData icon, String value, String label) {
-    return Column(
-      children: [
-        Icon(
-          icon,
-          color: AppTheme.primaryBlue,
-          size: 24,
-        ),
-        const SizedBox(height: 4),
-        Text(
-          value,
-          style: AppTheme.bodyText.copyWith(
+    return SizedBox(
+      width: 70, // Fixed width for consistent spacing
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            icon,
             color: AppTheme.primaryBlue,
-            fontWeight: FontWeight.bold,
+            size: 24,
           ),
-        ),
-        Text(
-          label,
-          style: AppTheme.bodyTextSmall.copyWith(
-            color: AppTheme.secondaryBlue,
+          const SizedBox(height: 4),
+          Text(
+            value,
+            style: AppTheme.bodyText.copyWith(
+              color: AppTheme.primaryBlue,
+              fontWeight: FontWeight.bold,
+            ),
+            textAlign: TextAlign.center,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
           ),
-        ),
-      ],
+          Text(
+            label,
+            style: AppTheme.bodyTextSmall.copyWith(
+              color: AppTheme.secondaryBlue,
+            ),
+            textAlign: TextAlign.center,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ],
+      ),
     );
   }
 

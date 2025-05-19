@@ -4,8 +4,9 @@ import 'package:image_picker/image_picker.dart';
 import 'package:cursortest/utils/theme.dart';
 import 'package:cursortest/services/location_service.dart';
 import 'package:cursortest/services/image_validation_service.dart';
+import 'package:cursortest/services/supabase_service.dart';
 import 'package:cursortest/services/report_service.dart';
-import 'package:cursortest/services/geocoding_service.dart';
+
 import 'dart:io';
 import 'package:cursortest/widgets/custom_toast.dart';
 import 'package:cursortest/screens/report_success_screen.dart';
@@ -21,7 +22,8 @@ class _ReportFormScreenState extends State<ReportFormScreen> {
   final _formKey = GlobalKey<FormState>();
   final _locationService = LocationService();
   final _imageValidationService = ImageValidationService();
-  final _reportService = ReportService();
+  final _supabaseService = SupabaseService();
+  final _reportService = ReportService(); // Keep for local backup/post-validation
   
   // Form data
   String _description = '';
@@ -173,13 +175,37 @@ class _ReportFormScreenState extends State<ReportFormScreen> {
       double? finalLatitude;
       double? finalLongitude;
 
-      // If user provided a manual location, try to geocode it
-      if (_locationDescription != null && _locationDescription!.trim().isNotEmpty) {
-        final coords = await GeocodingService.getCoordinatesFromAddress(_locationDescription!);
-        if (coords != null) {
-          finalLatitude = coords['lat'];
-          finalLongitude = coords['lng'];
-        } else {
+      if (_currentPosition != null) {
+        // Use GPS coordinates
+        finalLatitude = _currentPosition!.latitude;
+        finalLongitude = _currentPosition!.longitude;
+      } else {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: Colors.transparent,
+            elevation: 0,
+            behavior: SnackBarBehavior.floating,
+            content: const CustomToast(
+              message: 'Location is required. Please enable location services.',
+              type: ToastType.error,
+            ),
+          ),
+        );
+        setState(() {
+          _isSubmitting = false;
+        });
+        return;
+      }
+
+      // Process and upload image if provided
+      String? imageUrl;
+      if (_imagePath != null) {
+        final imageFile = File(_imagePath!);
+        // Upload image to Supabase storage
+        imageUrl = await _supabaseService.uploadImage(imageFile);
+        
+        if (imageUrl == null) {
           if (!mounted) return;
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
@@ -187,7 +213,7 @@ class _ReportFormScreenState extends State<ReportFormScreen> {
               elevation: 0,
               behavior: SnackBarBehavior.floating,
               content: const CustomToast(
-                message: 'Could not resolve location. Please check the address.',
+                message: 'Failed to upload image. Please try again.',
                 type: ToastType.error,
               ),
             ),
@@ -197,73 +223,60 @@ class _ReportFormScreenState extends State<ReportFormScreen> {
           });
           return;
         }
-      } else if (_currentPosition != null) {
-        // Use GPS coordinates if no manual location provided
-        finalLatitude = _currentPosition!.latitude;
-        finalLongitude = _currentPosition!.longitude;
-      } else {
-        throw Exception('Location is required');
       }
 
-      // Create the report with image validation status
-      final report = {
-        'latitude': finalLatitude,
-        'longitude': finalLongitude,
-        'locationDescription': _locationDescription,
-        'description': _description,
-        'severity': _severity,
-        'imageUrl': _imagePath,
-        'timestamp': DateTime.now().toIso8601String(),
-        'reportedBy': 'User', // Replace with actual user ID when authentication is implemented
-        'imageValidated': _imageValidationResult?.imageValidated ?? false,
-      };
-
-      // Submit the report
-      final submittedReport = await _reportService.submitReport(
+      // Submit report to Supabase
+      final reportData = await _supabaseService.submitFloodReport(
+        description: _description,
+        location: (_locationDescription?.trim().isNotEmpty ?? false) ? _locationDescription!.trim() : 'GPS Location',
         latitude: finalLatitude!,
         longitude: finalLongitude!,
+        severity: _severity,
+        riskLevel: _severity, // Use severity as initial risk level
+        imageUrl: imageUrl,
+        imageValidated: _imageValidationResult?.isValid ?? false,
+        elevation: _currentPosition?.altitude,
+        scpRiskLevel: 'Normal', // Default value, will be updated in validation
+        floodZoneMatch: false, // Will be checked in validation
+      );
+      
+      if (reportData == null) {
+        throw Exception('Failed to submit report to database');
+      }
+      
+      // Also save locally for backup and post-validation
+      await _reportService.submitReport(
+        latitude: finalLatitude,
+        longitude: finalLongitude,
         description: _description,
         severity: _severity,
         imagePath: _imagePath,
-        imageValidated: _imageValidationResult?.imageValidated ?? false,
+        imageValidated: _imageValidationResult?.isValid ?? false,
       );
 
       if (!mounted) return;
-      
       setState(() {
         _isSubmitting = false;
       });
 
-      // Show appropriate message based on image validation
+      // Show success message
       String? warningMessage;
-      if (!_imageValidationResult!.imageValidated) {
-        warningMessage = 'Image validation was inconclusive. We\'ll verify your report based on your location and rainfall.';
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            backgroundColor: Colors.transparent,
-            elevation: 0,
-            behavior: SnackBarBehavior.floating,
-            content: CustomToast(
-              message: warningMessage,
-              type: ToastType.warning,
-            ),
-            duration: const Duration(seconds: 5),
-          ),
-        );
-      } else {
-        warningMessage = null;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            backgroundColor: Colors.transparent,
-            elevation: 0,
-            behavior: SnackBarBehavior.floating,
-            content: const CustomToast(
-              message: 'Report submitted successfully',
-              type: ToastType.success,
-            ),
-          ),
-        );
+      if (!(_imageValidationResult?.isValid ?? false) && _imagePath != null) {
+        warningMessage = 'Image validation failed. Report submitted with unverified image.';
       }
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+          behavior: SnackBarBehavior.floating,
+          content: const CustomToast(
+            message: 'Report submitted successfully',
+            type: ToastType.success,
+          ),
+        ),
+      );
 
       // Navigate to the success screen
       Navigator.of(context).pushReplacement(
@@ -275,6 +288,19 @@ class _ReportFormScreenState extends State<ReportFormScreen> {
         _isSubmitting = false;
         _error = e.toString();
       });
+      
+      // Show error message
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+          behavior: SnackBarBehavior.floating,
+          content: CustomToast(
+            message: 'Error submitting report: ${e.toString()}',
+            type: ToastType.error,
+          ),
+        ),
+      );
     }
   }
   
@@ -603,8 +629,8 @@ class _ReportFormScreenState extends State<ReportFormScreen> {
                         const SizedBox(height: 16),
                         TextFormField(
                           decoration: InputDecoration(
-                            labelText: 'Location Description',
-                            hintText: 'e.g., Ugbowo, Benin City, Edo State',
+                            labelText: 'Location',
+                            hintText: 'e.g., Ugbowo Main Road',
                             filled: true,
                             fillColor: AppTheme.accentWhite,
                             border: OutlineInputBorder(
@@ -612,14 +638,17 @@ class _ReportFormScreenState extends State<ReportFormScreen> {
                             ),
                             prefixIcon: const Icon(Icons.location_on),
                           ),
+                          style: AppTheme.bodyText.copyWith(
+                            color: AppTheme.darkBlue,
+                          ),
+                          onSaved: (value) {
+                            _locationDescription = value?.trim() ?? '';
+                          },
                           validator: (value) {
-                            if (value == null || value.isEmpty) {
+                            if (value == null || value.trim().isEmpty) {
                               return 'Please enter your location';
                             }
                             return null;
-                          },
-                          onSaved: (value) {
-                            _locationDescription = value;
                           },
                         ),
                         const SizedBox(height: 16),
@@ -708,16 +737,16 @@ class _ReportFormScreenState extends State<ReportFormScreen> {
                         ),
                       ],
                     ),
-          isActive: _currentStep >= 0,
-          state: _currentStep > 0 ? StepState.complete : StepState.indexed,
-        ),
-        Step(
-          title: Text(
-            'Details',
-            style: AppTheme.headingSmall.copyWith(
-              color: AppTheme.darkBlue,
+              isActive: _currentStep >= 0,
+              state: _currentStep > 0 ? StepState.complete : StepState.indexed,
             ),
-          ),
+            Step(
+              title: Text(
+                'Details',
+                style: AppTheme.headingSmall.copyWith(
+                  color: AppTheme.darkBlue,
+                ),
+              ),
           content: Form(
             key: _formKey,
             child: Column(
@@ -807,7 +836,7 @@ class _ReportFormScreenState extends State<ReportFormScreen> {
                     });
                   },
                   validator: (value) {
-                    if (value == null || value.isEmpty) {
+                    if (value == null || value.trim().isEmpty) {
                       return 'Please select a severity level';
                     }
                     return null;
